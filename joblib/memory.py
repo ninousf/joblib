@@ -420,7 +420,7 @@ class MemorizedFunc(Logger):
     #-------------------------------------------------------------------------
 
     def __init__(self, func, cachedir, ignore=None, mmap_mode=None,
-                 compress=False, verbose=1, timestamp=None):
+                 compress=False, verbose=1, timestamp=None, stack=None):
         """
             Parameters
             ----------
@@ -445,6 +445,8 @@ class MemorizedFunc(Logger):
             timestamp: float, optional
                 The reference time from which times in tracing messages
                 are reported.
+            stack: dict, optional
+                Stack of cached functions called
         """
         Logger.__init__(self)
         self.mmap_mode = mmap_mode
@@ -477,6 +479,7 @@ class MemorizedFunc(Logger):
             # Pydoc does a poor job on other objects
             doc = func.__doc__
         self.__doc__ = 'Memoized version of %s' % doc
+        self.stack = stack
 
     def _cached_call(self, args, kwargs):
         """Call wrapped function and cache result, or read cache if available.
@@ -500,7 +503,11 @@ class MemorizedFunc(Logger):
         metadata = None
         output_pickle_path = os.path.join(output_dir, 'output.pkl')
         # FIXME: The statements below should be try/excepted
-        if not (self._check_previous_func_code(stacklevel=4) and
+        if self.stack: 
+            func_check = self._check_stack(output_dir)
+        else:
+            func_check = self._check_previous_func_code(stacklevel=4)
+        if not ( func_check and
                 os.path.isfile(output_pickle_path)):
             if self._verbose > 10:
                 _, name = get_func_name(self.func)
@@ -572,7 +579,6 @@ class MemorizedFunc(Logger):
     #-------------------------------------------------------------------------
     # Private interface
     #-------------------------------------------------------------------------
-
     def _get_argument_hash(self, *args, **kwargs):
         return hashing.hash(filter_args(self.func, self.ignore,
                                          args, kwargs),
@@ -603,6 +609,9 @@ class MemorizedFunc(Logger):
         func_code_h = hash(getattr(self.func, '__code__', None))
         return id(self.func), hash(self.func), func_code_h
 
+    def _hash_func_id(self):
+        return hash(get_func_code(self.func))
+
     def _write_func_code(self, filename, func_code, first_line):
         """ Write the function code and the filename to a file.
         """
@@ -632,6 +641,26 @@ class MemorizedFunc(Logger):
                 # Some callable are not hashable
                 pass
 
+    def _check_stack(self, output_dir):
+        if self._check_previous_func_code(stacklevel=4) is False:
+            return False
+        metadata_file = os.path.join(output_dir, 'metadata.json')
+        try:
+            with open(metadata_file, 'rb') as f:
+                metadata = json.load(f)
+        except IOError:
+            return True
+        if "stack" not in metadata:
+            return True
+        cached_funcs = self.stack["cached"]
+        ret = True
+        for hash_func_id in metadata["stack"]:
+            mem_func = cached_funcs.get(hash_func_id)
+            mem_check = (mem_func is not None and
+                         mem_func._check_previous_func_code(stacklevel=4))
+            ret = ret and mem_check
+        return ret
+    
     def _check_previous_func_code(self, stacklevel=2):
         """
             stacklevel is the depth a which this function is called, to
@@ -652,14 +681,12 @@ class MemorizedFunc(Logger):
         except TypeError:
             # Some callables are not hashable
             pass
-
         # Here, we go through some effort to be robust to dynamically
         # changing code and collision. We cannot inspect.getsource
         # because it is not reliable when using IPython's magic "%run".
         func_code, source_file, first_line = get_func_code(self.func)
         func_dir = self._get_func_dir()
         func_code_file = os.path.join(func_dir, 'func_code.py')
-
         try:
             with io.open(func_code_file, encoding="UTF-8") as infile:
                 old_func_code, old_first_line = \
@@ -738,14 +765,26 @@ class MemorizedFunc(Logger):
             persist the output values.
         """
         start_time = time.time()
-        output_dir, _ = self._get_output_dir(*args, **kwargs)
+        output_dir, argument_hash = self._get_output_dir(*args, **kwargs)
         if self._verbose > 0:
             print(format_call(self.func, args, kwargs))
-        output = self.func(*args, **kwargs)
-        self._persist_output(output, output_dir)
-        duration = time.time() - start_time
-        metadata = self._persist_input(output_dir, duration, args, kwargs)
-
+        store_stack = False
+        if self.stack:
+            hash_func_id = self._hash_func_id()
+            self.stack['cached'][hash_func_id] = self
+            if 'current' not in self.stack:
+                self.stack['current'] = set()
+                store_stack = True
+            else:
+                self.stack['current'].add(hash_func_id)
+        try:
+            output = self.func(*args, **kwargs)            
+            self._persist_output(output, output_dir)
+            duration = time.time() - start_time
+            metadata = self._persist_input(output_dir, duration, args, kwargs, store_stack)
+        finally:
+            if self.stack and store_stack:
+                del self.stack['current']
         if self._verbose > 0:
             _, name = get_func_name(self.func)
             msg = '%s - %s' % (name, format_time(duration))
@@ -768,7 +807,7 @@ class MemorizedFunc(Logger):
             " Race condition in the creation of the directory "
 
     def _persist_input(self, output_dir, duration, args, kwargs,
-                       this_duration_limit=0.5):
+                       store_stack, this_duration_limit=0.5):
         """ Save a small summary of the call using json format in the
             output directory.
 
@@ -793,16 +832,18 @@ class MemorizedFunc(Logger):
         # This can fail due to race-conditions with multiple
         # concurrent joblibs removing the file or the directory
         metadata = {"duration": duration, "input_args": input_repr}
+        if store_stack:
+            metadata["stack"] = list(self.stack['current'])
         try:
             mkdirp(output_dir)
             filename = os.path.join(output_dir, 'metadata.json')
-
             def write_func(output, dest_filename):
                 with open(dest_filename, 'w') as f:
                     json.dump(output, f)
 
             concurrency_safe_write(metadata, filename, write_func)
-        except Exception:
+        except Exception as e:
+            # FIXME: do something
             pass
 
         this_duration = time.time() - start_time
@@ -858,7 +899,7 @@ class Memory(Logger):
     #-------------------------------------------------------------------------
 
     def __init__(self, cachedir, mmap_mode=None, compress=False, verbose=1,
-                 bytes_limit=None):
+                 bytes_limit=None, check_stack=False):
         """
             Parameters
             ----------
@@ -880,6 +921,8 @@ class Memory(Logger):
                 as functions are evaluated.
             bytes_limit: int, optional
                 Limit in bytes of the size of the cache
+            check_stack: boolean, optional
+                Check cache status for all functions involved in a cached function call.
         """
         # XXX: Bad explanation of the None value of cachedir
         Logger.__init__(self)
@@ -896,6 +939,7 @@ class Memory(Logger):
         else:
             self.cachedir = os.path.join(cachedir, 'joblib')
             mkdirp(self.cachedir)
+        self.stack = dict(cached=dict()) if check_stack else None
 
     def cache(self, func=None, ignore=None, verbose=None,
                         mmap_mode=False):
@@ -942,7 +986,8 @@ class Memory(Logger):
                                    ignore=ignore,
                                    compress=self.compress,
                                    verbose=verbose,
-                                   timestamp=self.timestamp)
+                                   timestamp=self.timestamp,
+                                   stack=self.stack)
 
     def clear(self, warn=True):
         """ Erase the complete cache directory.

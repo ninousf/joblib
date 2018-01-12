@@ -858,8 +858,37 @@ def test_memory_recomputes_after_an_error_why_loading_results(tmpdir,
     # https://github.com/pytest-dev/pytest/issues/2079)
     monkeypatch.setattr(cached_func, 'warn', append_to_record)
     recomputed_arg, recomputed_timestamp = cached_func(arg)
+    print recorded_warnings
     assert len(recorded_warnings) == 1
     exception_msg = 'Exception while loading results'
     assert exception_msg in recorded_warnings[0]
     assert recomputed_arg == arg
     assert recomputed_timestamp > timestamp
+
+def test_stack(tmpdir):
+    
+    def pass1():
+        mem = Memory(tmpdir.strpath, check_stack=True)
+        @mem.cache
+        def func1(arg):
+            return arg+'o'
+        @mem.cache
+        def func2(arg):
+            return arg+func1('o')
+        return func2('z')
+    assert pass1() == 'zoo'
+    
+    def pass2():
+        mem = Memory(tmpdir.strpath, check_stack=True)
+        @mem.cache
+        def func1(arg):
+            return arg+'e'
+        @mem.cache
+        def func2(arg):
+            return arg+func1('o')
+        return func2('z')
+    assert pass2() == 'zoe'
+
+    
+
+    
