@@ -858,7 +858,6 @@ def test_memory_recomputes_after_an_error_why_loading_results(tmpdir,
     # https://github.com/pytest-dev/pytest/issues/2079)
     monkeypatch.setattr(cached_func, 'warn', append_to_record)
     recomputed_arg, recomputed_timestamp = cached_func(arg)
-    print recorded_warnings
     assert len(recorded_warnings) == 1
     exception_msg = 'Exception while loading results'
     assert exception_msg in recorded_warnings[0]

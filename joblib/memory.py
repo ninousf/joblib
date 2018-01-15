@@ -267,7 +267,7 @@ class MemorizedResult(Logger):
             # No error is relevant here.
             try:
                 with open(os.path.join(self._output_dir, 'metadata.json'),
-                          'rb') as f:
+                          'r') as f:
                     self.metadata = json.load(f)
             except:
                 pass
@@ -646,7 +646,7 @@ class MemorizedFunc(Logger):
             return False
         metadata_file = os.path.join(output_dir, 'metadata.json')
         try:
-            with open(metadata_file, 'rb') as f:
+            with open(metadata_file, mode='r') as f:
                 metadata = json.load(f)
         except IOError:
             return True
@@ -712,7 +712,7 @@ class MemorizedFunc(Logger):
             warnings.warn(JobLibCollisionWarning(
                 "Cannot detect name collisions for function '%s'"
                         % func_description), stacklevel=stacklevel)
-
+            
         # Fetch the code at the old location and compare it. If it is the
         # same than the code store, we have a collision: the code in the
         # file has not changed, but the name we have is pointing to a new
